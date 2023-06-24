@@ -1,100 +1,220 @@
-const { WebSocketServer } = require('ws');
+const { WebSocketServer, WebSocket } = require("ws");
 
 const port = process.env.PORT || 80;
-const path = 'WSPATH' in process.env ? process.env.WSPATH : undefined;
+const path = "WSPATH" in process.env ? process.env.WSPATH : undefined;
 const wss = new WebSocketServer({ port, path });
 const channels = new Map();
-const clients = new WeakMap();
+const clients = new Map();
+let timer;
 
-wss.on('connection', function connection(ws) {
-  console.debug('connection...')
-  ws.on('message', function message(data) {
-    console.log(data)
-    if (data.command === 'join') {
-      if (!data.channel) {
-        return client.send({ command: 'nochannel' });
+(function clearTimeoutClient() {
+  timer = setTimeout(() => {
+    const clientIds = [];
+    for (const ws of wss.clients) {
+      clientIds.push(ws.id);
+    }
+    for (const clientId of clients.keys()) {
+      if (clientIds.includes(clientId)) {
+        continue;
       }
-      const joinedChannelName = clients.get(ws);
+      const channel = clients.get(clientId);
+      if (!channel) {
+        clients.delete(clientId);
+      }
+      channel.delete(clientId);
+      if (channel.size === 0) {
+        channels.delete(channelName);
+      }
+      console.debug("clear!", clientId);
+      for (const clientId of channel) {
+        const client = getClient(clientId);
+        if (client?.readyState !== WebSocket.OPEN) {
+          console.warn("client not open", clientId);
+          continue;
+        }
+        client.send(
+          JSON.stringify({ command: "exited", clientId, reason: "timeout" })
+        );
+      }
+    }
+    if (timer) {
+      clearTimeoutClient();
+    }
+  }, process.env.TIMEOUT || 5 * 60 * 1000);
+})();
+
+function getClient(clientId) {
+  let client;
+  wss.clients.forEach((ws) => {
+    if (ws.id === clientId) {
+      client = ws;
+      return false;
+    }
+  });
+  return client;
+}
+
+wss.on("connection", function connection(ws) {
+  console.debug("connection...");
+  ws.on("message", function message(data) {
+    try {
+      data = JSON.parse(data.toString());
+      console.debug("message...", data, ws.id);
+    } catch (err) {
+      console.error(err);
+    }
+    if (data.command === "id") {
+      const exists = getClient(data.id);
+      if (exists) {
+        console.debug("exists!", data.id);
+        return ws.send(
+          JSON.stringify({ command: "exists", clientId: data.id })
+        );
+      }
+      ws.id = data.id;
+    } else if (data.command === "join") {
+      if (!data.channel) {
+        console.debug("nochannel!");
+        return ws.send(JSON.stringify({ command: "nochannel" }));
+      }
+      if (!ws.id) {
+        console.debug("no id!");
+        return ws.send(JSON.stringify({ command: "noid" }));
+      }
+      const joinedChannelName = clients.get(ws.id);
       if (joinedChannelName) {
         const joinedChannel = channels.get(joinedChannelName);
         if (joinedChannelName !== data.channel) {
           if (!joinedChannel) {
-            clients.delete(ws);
+            clients.delete(ws.id);
           } else {
             joinedChannel.delete(ws);
           }
         } else {
           if (joinedChannel) {
-            return ws.send({ command: 'joined', clients: joinedChannel.size });
+            console.debug("joined!");
+            return ws.send(
+              JSON.stringify({ command: "joined", clients: joinedChannel.size })
+            );
           }
         }
       }
       let channel = channels.get(data.channel);
       if (!channel) {
-        channel = new WeakSet();
+        channel = new Set();
         channels.set(data.channel, channel);
       }
-      channel.add(ws);
-      clients.set(ws, data.channel);
-      for (const client of channel) {
-        if (client.readyState !== WebSocket.OPEN) {
-          console.warn('client not open')
+      channel.add(ws.id);
+      clients.set(ws.id, data.channel);
+      for (const clientId of channel) {
+        const client = getClient(clientId);
+        if (client?.readyState !== WebSocket.OPEN) {
+          console.warn("client not open", clientId);
           continue;
         }
-        return client.send({ command: 'joined', clients: channel.size });
+        client.send(
+          JSON.stringify({ command: "joined", clients: Array.from(channel) })
+        );
       }
-    }
-    if (data.command === 'exit') {
-      const channelName = clients.get(ws);
+    } else if (data.command === "exit") {
+      if (!ws.id) {
+        console.debug("no id!");
+        return ws.send(JSON.stringify({ command: "noid" }));
+      }
+      const channelName = clients.get(ws.id);
       if (!channelName) {
-        return client.send({ command: 'nochannel' });
+        console.debug("nochannel!");
+        return ws.send(JSON.stringify({ command: "nochannel" }));
       }
       const channel = channels.get(channelName);
-      channel?.delete(ws);
-      clients.delete(ws);
+      channel?.delete(ws.id);
+      clients.delete(ws.id);
       if (channel.size === 0) {
         channels.delete(channelName);
       }
-      return client.send({ command: 'exited' });
-    }
-    if (data.command === 'send') {
-      const channel = channels.get(clients.get(ws));
-      if (!channel) {
-        return client.send({ command: 'nochannel' });
+      console.debug("exited!", ws.id);
+      ws.send(JSON.stringify({ command: "exited", clientId: ws.id }));
+      // console.log('existed', channel, ws.id)
+      for (const clientId of channel) {        
+        const client = getClient(clientId);
+        if (client?.readyState !== WebSocket.OPEN) {
+          console.warn("client not open", clientId);
+          continue;
+        }
+        client.send(JSON.stringify({ command: "exited", clientId: ws.id }));
       }
-      for (const client of channel) {
+    } else if (data.command === "send") {
+      if (!ws.id) {
+        console.debug("no id!");
+        return ws.send(JSON.stringify({ command: "noid" }));
+      }
+      const channel = channels.get(clients.get(ws.id));
+      if (!channel) {
+        console.debug("nochannel!");
+        return ws.send(JSON.stringify({ command: "nochannel" }));
+      }
+      for (const clientId of channel) {
+        const client = getClient(clientId);
         if (client === ws) {
           continue;
         }
-        if (client.readyState !== WebSocket.OPEN) {
-          console.warn('client not open')
+        if (client?.readyState !== WebSocket.OPEN) {
+          console.warn("client not open", clientId);
           continue;
         }
-        client.send({ command: 'sent', type: data.type, message: data.message });
+        client.send(JSON.stringify({
+          command: "sent",
+          type: data.type,
+          message: data.message,
+        }));
       }
+    } else {
+      console.debug("nocommand!");
+      return ws.send(JSON.stringify({ command: "nocommand" }));
     }
   });
-  ws.on('close', function message() {
-    console.debug('close...')
-    const channelName = clients.get(ws);
+  ws.on("close", function message() {
+    console.debug("close...", ws.id);
+    if (!ws.id) {
+      // console.debug("noid!");
+      return;
+    }
+    const channelName = clients.get(ws.id);
     if (!channelName) {
+      // console.debug("nochannel!");
       return;
     }
     const channel = channels.get(channelName);
-    channel?.delete(ws);
-    clients.delete(ws);
+    channel?.delete(ws.id);
+    clients.delete(ws.id);
     if (channel.size === 0) {
       channels.delete(channelName);
     }
   });
+  ws.on("error", console.error);
 });
-wss.on('close', function () {
-  console.debug('close server...')
-  clients.forEach((channelName, client) => {
-    channels.get(channelName)?.delete(client);
-    client.send({ command: 'kickout' });
+wss.on("close", function () {
+  console.debug("close server...");
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  clients.forEach((channelName, clientId) => {
+    channels.get(channelName)?.delete(clientId);
+    console.debug("kickout", clientId);
+    getClient(clientId)?.send(JSON.stringify({ command: "kickout" }));
   });
   channels.clear();
   clients.clear();
-})
-console.log('ws litening at ' + port, path || '')
+});
+console.log("ws litening at " + port, path || "");
+module.exports.server = wss;
+module.exports.close = function (cb) {
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  wss.close(cb);
+};
+module.exports.channels = channels;
+module.exports.clients = clients;
