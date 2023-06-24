@@ -4,6 +4,7 @@
   "description": "基于ws的数据交换中心用于同步分布式客户端配置",
   "main": "app.js",
   "scripts": {
+    "dev": "cross-env PORT=9201 node ./app.js",
     "test": "mocha app.test.js"
   },
   "repository": {
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "chai": "^4.3.7",
+    "cross-env": "^7.0.3",
     "mocha": "^10.1.0"
   }
 }
